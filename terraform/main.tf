@@ -1,3 +1,4 @@
+# terraform/main.tf
 # Core infrastructure resources
 # Note: Provider configuration is in versions.tf
 
@@ -53,7 +54,7 @@ resource "azurerm_network_security_group" "main" {
   location           = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
 
-  # Allow HTTP traffic on port 3000
+  # Allow HTTP traffic on port 3000 (for your Node.js app)
   security_rule {
     name                       = "Allow-HTTP"
     priority                   = 1001
@@ -88,33 +89,39 @@ resource "azurerm_subnet_network_security_group_association" "main" {
   network_security_group_id = azurerm_network_security_group.main.id
 }
 
-# Container Instance - where your app will actually run
+# Container Instance - where your Node.js app will actually run
 resource "azurerm_container_group" "main" {
   name                = "${var.project_name}-containers"
   location           = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
   os_type            = "Linux"
-  subnet_ids         = [azurerm_subnet.containers.id]
-
+  
+  # Authentication for your private Azure Container Registry
+  image_registry_credential {
+    server   = azurerm_container_registry.main.login_server
+    username = azurerm_container_registry.main.admin_username
+    password = azurerm_container_registry.main.admin_password
+  }
+  
   container {
     name   = "web"
-    image  = var.container_image  # We'll update this to use your registry
-    cpu    = "0.5"               # Half a CPU core (cost optimization)
-    memory = "1.0"               # 1GB RAM (sufficient for Node.js)
+    image  = "${azurerm_container_registry.main.login_server}/cloud-platform-starter:latest"
+    cpu    = "0.5"  # Half a CPU core (cost optimization)
+    memory = "1.0"  # 1GB RAM (sufficient for Node.js)
 
     ports {
-      port     = 3000
+      port     = 3000  # Your Node.js app port
       protocol = "TCP"
     }
 
-    # Environment variables for your app
+    # Environment variables for your Node.js app
     environment_variables = {
       "NODE_ENV" = var.environment
       "PORT"     = "3000"
     }
   }
 
-  # Make container accessible from internet
+  # Make container accessible from internet with friendly DNS name
   ip_address_type = "Public"
   dns_name_label  = "${var.project_name}-${var.environment}"
 

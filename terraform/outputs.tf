@@ -1,4 +1,5 @@
-
+# terraform/outputs.tf
+# Updated for Node.js application running on port 3000
 
 # ============================================================================
 # BASIC RESOURCE INFORMATION
@@ -176,5 +177,4 @@ output "troubleshooting_endpoints" {
     app_info     = "curl http://${azurerm_container_group.main.fqdn}:3000/info"
     error_test   = "curl http://${azurerm_container_group.main.fqdn}:3000/error"
   }
-  }
-
+}
