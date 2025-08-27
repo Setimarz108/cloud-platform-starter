@@ -1,0 +1,177 @@
+# .github/workflows/deploy.yml
+# Industry standard CI/CD pipeline using GitHub Actions marketplace
+
+name: Deploy to Azure
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY_NAME: cpsregistry01
+  IMAGE_NAME: cloud-platform-starter
+  RESOURCE_GROUP: rg-cloud-platform-starter
+
+jobs:
+  # Test and validate using standard GitHub Actions
+  test:
+    name: Test & Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for super-linter
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'app/package-lock.json'
+    
+    - name: Install dependencies
+      working-directory: ./app
+      run: npm ci
+    
+    # GitHub's official multi-language linter
+    - name: Super-Linter
+      uses: github/super-linter/slim@v5
+      env:
+        DEFAULT_BRANCH: main
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VALIDATE_JAVASCRIPT_ES: true
+        VALIDATE_DOCKERFILE_HADOLINT: true
+        VALIDATE_JSON: true
+        VALIDATE_MARKDOWN: true
+        VALIDATE_YAML: true
+        LINTER_RULES_PATH: '.'
+        JAVASCRIPT_ES_CONFIG_FILE: '.eslintrc.json'
+    
+    # Standard npm security audit
+    - name: NPM Security Audit
+      working-directory: ./app
+      run: |
+        npm audit --audit-level=moderate
+        echo "Dependency security audit completed"
+    
+    # Build container for testing
+    - name: Build test container
+      working-directory: ./app
+      run: |
+        docker build -t ${{ env.IMAGE_NAME }}:test .
+        echo "Container build completed"
+    
+    # Industry standard container security scanning
+    - name: Container Vulnerability Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: '${{ env.IMAGE_NAME }}:test'
+        format: 'table'
+        severity: 'HIGH,CRITICAL'
+        exit-code: '0'  # Report vulnerabilities but don't fail build
+    
+    # CodeQL security analysis (GitHub's SAST)
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: javascript
+    
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+  # Build and deploy (only on main branch)
+  build-deploy:
+    name: Build & Deploy
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Build and push container
+      working-directory: ./app
+      run: |
+        # Login to container registry
+        az acr login --name ${{ env.REGISTRY_NAME }}
+        
+        # Build with commit tag for traceability
+        COMMIT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
+        
+        # Build image with metadata
+        docker build \
+          --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+          --label "org.opencontainers.image.revision=${{ github.sha }}" \
+          --label "org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+          -t ${{ env.IMAGE_NAME }}:latest .
+        
+        # Tag for registry
+        docker tag ${{ env.IMAGE_NAME }}:latest ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+        docker tag ${{ env.IMAGE_NAME }}:latest ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:sha-$COMMIT_SHA
+        
+        # Push to registry
+        docker push ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+        docker push ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:sha-$COMMIT_SHA
+        
+        echo "Container pushed successfully with tags: latest, sha-$COMMIT_SHA"
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: '~1.0'
+    
+    - name: Deploy infrastructure
+      working-directory: ./terraform
+      run: |
+        # Initialize Terraform
+        terraform init
+        
+        # Validate configuration
+        terraform validate
+        
+        # Plan and apply changes
+        terraform plan -out=deployment.plan
+        terraform apply -auto-approve deployment.plan
+        
+        echo "Infrastructure deployment completed"
+    
+    # Application health verification
+    - name: Health Check
+      uses: nick-fields/retry@v2
+      with:
+        timeout_minutes: 10
+        max_attempts: 5
+        retry_wait_seconds: 30
+        command: |
+          APP_URL="http://cloud-platform-starter-dev.eastus.azurecontainer.io:3000"
+          curl -f --connect-timeout 10 "$APP_URL/health"
+          echo "Application health check passed"
+    
+    - name: Deployment Summary
+      run: |
+        echo "Deployment completed successfully!"
+        echo "Application URL: http://cloud-platform-starter-dev.eastus.azurecontainer.io:3000"
+        echo "Health endpoint: http://cloud-platform-starter-dev.eastus.azurecontainer.io:3000/health"
+        echo "Metrics endpoint: http://cloud-platform-starter-dev.eastus.azurecontainer.io:3000/metrics"
+        echo "Deployed commit: ${{ github.sha }}"
+        echo "Build time: $(date)"
+        
+        # Test final endpoints
+        APP_URL="http://cloud-platform-starter-dev.eastus.azurecontainer.io:3000"
+        echo "Final verification:"
+        curl -s "$APP_URL" | jq -r '.message // "Application responding"'
+        curl -s "$APP_URL/health" | jq -r '.status // "Health check responding"'
